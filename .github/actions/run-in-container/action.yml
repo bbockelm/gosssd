@@ -8,6 +8,9 @@ inputs:
   dockerfile-changed:
     description: Whether the Dockerfile changed (true/false)
     required: true
+  event-name:
+    description: GitHub event name (pull_request, push, etc)
+    required: true
   pr-number:
     description: Pull request number (if applicable)
     required: false
@@ -30,24 +33,29 @@ runs:
   using: composite
   steps:
   - name: Download and load image artifact (PRs with Dockerfile changes)
-    if: github.event_name == 'pull_request' && inputs.dockerfile-changed == 'true'
+    if: inputs.event-name == 'pull_request' && inputs.dockerfile-changed == 'true'
     uses: actions/download-artifact@v4
     with:
       name: gosssd-image-pr-${{ inputs.pr-number }}
       path: /tmp
 
   - name: Load image from artifact
-    if: github.event_name == 'pull_request' && inputs.dockerfile-changed == 'true'
+    if: inputs.event-name == 'pull_request' && inputs.dockerfile-changed == 'true'
     shell: bash
     run: docker load < /tmp/gosssd-image.tar.gz
 
   - name: Log in to GHCR (for pulling image)
-    if: github.event_name != 'pull_request' || inputs.dockerfile-changed != 'true'
+    if: inputs.event-name != 'pull_request' || inputs.dockerfile-changed != 'true'
     uses: docker/login-action@v3
     with:
       registry: ghcr.io
       username: ${{ github.actor }}
       password: ${{ inputs.github-token }}
+
+  - name: Pull image from GHCR
+    if: inputs.event-name != 'pull_request' || inputs.dockerfile-changed != 'true'
+    shell: bash
+    run: docker pull ${{ inputs.image }}
 
   - name: Run command in container
     shell: bash

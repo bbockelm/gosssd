@@ -24,6 +24,7 @@ jobs:
       with:
         image: ${{ needs.build-container.outputs.image }}
         dockerfile-changed: ${{ needs.build-container.outputs.dockerfile-changed }}
+        event-name: ${{ github.event_name }}
         pr-number: ${{ github.event.number }}
         command: pre-commit run --all-files
         github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -42,6 +43,7 @@ jobs:
       with:
         image: ${{ needs.build-container.outputs.image }}
         dockerfile-changed: ${{ needs.build-container.outputs.dockerfile-changed }}
+        event-name: ${{ github.event_name }}
         pr-number: ${{ github.event.number }}
         command: gotestsum --format=testname -- -race -coverprofile=coverage.txt -covermode=atomic ./...
         privileged: 'true'
