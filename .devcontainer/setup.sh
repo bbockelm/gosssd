@@ -25,9 +25,6 @@ cd /workspaces/gosssd
 if [ -f "go.mod" ]; then
     echo "Installing Go dependencies..."
     go mod download
-    go install golang.org/x/tools/gopls@latest
-    go install github.com/securego/gosec/v2/cmd/gosec@latest
-    go install honnef.co/go/tools/cmd/staticcheck@latest
 fi
 
 # Install pre-commit and setup hooks

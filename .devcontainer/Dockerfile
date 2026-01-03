@@ -4,7 +4,7 @@ FROM almalinux:9
 RUN dnf -y update && \
     dnf -y install dnf-plugins-core && \
     dnf config-manager --set-enabled crb && \
-    dnf -y install \
+    dnf -y install --allowerasing \
     # Build tools
     gcc \
     gcc-c++ \
@@ -56,6 +56,11 @@ RUN dnf -y update && \
 # Set up Go environment
 ENV GOPATH=/go
 ENV PATH=$PATH:$GOPATH/bin:/usr/local/go/bin
+
+# Install Go tools for development
+RUN go install golang.org/x/tools/gopls@latest && \
+    go install github.com/securego/gosec/v2/cmd/gosec@latest && \
+    go install honnef.co/go/tools/cmd/staticcheck@latest
 
 # Create workspace directory
 WORKDIR /workspace
