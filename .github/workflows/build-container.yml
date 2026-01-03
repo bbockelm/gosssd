@@ -2,25 +2,119 @@ name: Build Container
 
 on:
   workflow_call:
+    outputs:
+      image:
+        description: Container image name
+        value: ${{ jobs.build.outputs.image }}
+      dockerfile-changed:
+        description: Whether Dockerfile changed
+        value: ${{ jobs.build.outputs.dockerfile-changed }}
   schedule:
   - cron: 0 0 * * 0      # Weekly on Sunday at midnight UTC
+  push:
+    branches: [main, master]
+    paths:
+    - .devcontainer/Dockerfile
+    - .devcontainer/.dockerignore
+    - .pre-commit-config.yaml
 
 jobs:
-  build:
+  detect-changes:
     runs-on: ubuntu-latest
     outputs:
-      image: ${{ steps.meta.outputs.tags }}
+      dockerfile-changed: ${{ steps.changes.outputs.dockerfile }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        fetch-depth: 0
+
+    - name: Check if Dockerfile changed
+      id: changes
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          # For PRs, compare with the base branch
+          if git diff origin/${{ github.base_ref }}...HEAD --quiet -- .devcontainer/Dockerfile 2>/dev/null; then
+            echo "dockerfile=false" >> $GITHUB_OUTPUT
+          else
+            echo "dockerfile=true" >> $GITHUB_OUTPUT
+          fi
+        else
+          # For pushes, compare with previous commit
+          if git diff HEAD~1 HEAD --quiet -- .devcontainer/Dockerfile 2>/dev/null; then
+            echo "dockerfile=false" >> $GITHUB_OUTPUT
+          else
+            echo "dockerfile=true" >> $GITHUB_OUTPUT
+          fi
+        fi
+
+  build:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      dockerfile-changed: ${{ needs.detect-changes.outputs.dockerfile-changed }}
     steps:
     - uses: actions/checkout@v4
 
+    - name: Set image output
+      id: image
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          if [[ "${{ needs.detect-changes.outputs.dockerfile-changed }}" == "true" ]]; then
+            echo "name=gosssd-dev:pr-${{ github.event.number }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=ghcr.io/${{ github.repository }}:latest" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "name=ghcr.io/${{ github.repository }}:latest" >> $GITHUB_OUTPUT
+        fi
+
     - name: Set up Docker Buildx
+      if: needs.detect-changes.outputs.dockerfile-changed == 'true' || github.event_name == 'schedule'
       uses: docker/setup-buildx-action@v3
 
-    - name: Build and load image
+    - name: Log in to GHCR (main branch only)
+      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+
+    - name: Build and push image (main branch)
+      if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && (needs.detect-changes.outputs.dockerfile-changed == 'true' || github.event_name == 'schedule')
       uses: docker/build-push-action@v6
       with:
-        context: .devcontainer
-        load: true
-        tags: gosssd-dev:latest
+        context: .
+        file: .devcontainer/Dockerfile
+        push: true
+        tags: ghcr.io/${{ github.repository }}:latest
         cache-from: type=gha
         cache-to: type=gha,mode=max
+
+    - name: Build and load image (PRs)
+      if: github.event_name == 'pull_request' && needs.detect-changes.outputs.dockerfile-changed == 'true'
+      uses: docker/build-push-action@v6
+      with:
+        context: .
+        file: .devcontainer/Dockerfile
+        load: true
+        tags: gosssd-dev:pr-${{ github.event.number }}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+
+    - name: Save image as artifact (PRs with Dockerfile changes)
+      if: github.event_name == 'pull_request' && needs.detect-changes.outputs.dockerfile-changed == 'true'
+      run: |
+        docker save gosssd-dev:pr-${{ github.event.number }} | gzip > /tmp/gosssd-image.tar.gz
+        ls -lh /tmp/gosssd-image.tar.gz
+
+    - name: Upload image artifact
+      if: github.event_name == 'pull_request' && needs.detect-changes.outputs.dockerfile-changed == 'true'
+      uses: actions/upload-artifact@v4
+      with:
+        name: gosssd-image-pr-${{ github.event.number }}
+        path: /tmp/gosssd-image.tar.gz
+        retention-days: 1

@@ -26,13 +26,18 @@ type TestSSSD struct {
 }
 
 // SetupTestSSSD creates and starts a self-contained SSSD instance for testing.
-// Returns nil if sssd is not available (skips test gracefully).
+// Returns nil if sssd is not available.
+// If GOSSSD_FAIL_BUILD_REQUIRED is set to "true", build failures will cause test failures.
+// Otherwise, build failures cause the test to skip gracefully.
 func SetupTestSSSD(t *testing.T) *TestSSSD {
 	t.Helper()
 
 	// Build custom SSSD with custom paths
 	sssdInstallDir, err := BuildCustomSSSD(t)
 	if err != nil {
+		if os.Getenv("GOSSSD_FAIL_BUILD_REQUIRED") == "true" {
+			t.Fatalf("Failed to build custom SSSD: %v", err)
+		}
 		t.Skipf("Failed to build custom SSSD: %v", err)
 		return nil
 	}
@@ -74,11 +79,18 @@ func SetupTestSSSD(t *testing.T) *TestSSSD {
 
 	// Create sssd.conf
 	confPath := filepath.Join(tempDir, "sssd.conf")
-	sssdConf := `[sssd]
+
+	// Determine current user for SSSD configuration
+	currentUserName := "root"
+	if u, err := user.Current(); err == nil && u.Username != "" {
+		currentUserName = u.Username
+	}
+
+	sssdConf := fmt.Sprintf(`[sssd]
 services = nss
 domains = LOCAL
 config_file_version = 2
-user = root
+user = %s
 
 [nss]
 memcache_timeout = 0
@@ -89,7 +101,7 @@ proxy_lib_name = files
 proxy_pam_target = sssd-shadowutils
 enumerate = true
 cache_credentials = false
-`
+`, currentUserName)
 
 	if err := os.WriteFile(confPath, []byte(sssdConf), 0600); err != nil {
 		_ = os.RemoveAll(tempDir)
@@ -172,16 +184,28 @@ cache_credentials = false
 
 	// Wait for socket to be available with longer timeout
 	t.Logf("Waiting for SSSD socket at %s", ts.SocketPath)
-	deadline := time.Now().Add(30 * time.Second)
+	deadline := time.Now().Add(5 * time.Second)
 	socketReady := false
 	for time.Now().Before(deadline) {
+		// Check if process has exited
+		if ts.Cmd.ProcessState != nil {
+			ts.Cleanup()
+			t.Fatalf("SSSD process exited prematurely during startup with exit code: %d", ts.Cmd.ProcessState.ExitCode())
+			return nil
+		}
+
 		if _, err := os.Stat(ts.SocketPath); err == nil {
-			// Socket exists, verify we can access it
-			socketReady = true
-			t.Logf("SSSD socket found, waiting for service to be fully ready and enumerate users...")
-			// Give SSSD time to enumerate users from the proxy provider
-			time.Sleep(2 * time.Second)
-			break
+			// Socket exists, now verify it's actually accepting connections
+			client := NewClient(WithSocketPath(ts.SocketPath))
+			err := client.Connect()
+			if err == nil {
+				client.Close()
+				socketReady = true
+				t.Logf("SSSD socket found and accepting connections")
+				break
+			}
+			// Socket exists but not ready yet, keep waiting
+			t.Logf("SSSD socket exists but not yet accepting connections, retrying...")
 		}
 		time.Sleep(200 * time.Millisecond)
 	}

@@ -1,0 +1,79 @@
+name: Run in Container
+description: Run a command inside the dev container, handling artifact loading or registry pull
+
+inputs:
+  image:
+    description: Container image name to use
+    required: true
+  dockerfile-changed:
+    description: Whether the Dockerfile changed (true/false)
+    required: true
+  event-name:
+    description: GitHub event name (pull_request, push, etc)
+    required: true
+  pr-number:
+    description: Pull request number (if applicable)
+    required: false
+  command:
+    description: Command to run inside the container
+    required: true
+  privileged:
+    description: Run container in privileged mode
+    required: false
+    default: 'false'
+  user:
+    description: User to run as inside the container
+    required: false
+    default: vscode
+  github-token:
+    description: GitHub token for GHCR authentication
+    required: true
+
+runs:
+  using: composite
+  steps:
+  - name: Debug inputs
+    shell: bash
+    run: |
+      echo "image: ${{ inputs.image }}"
+      echo "dockerfile-changed: ${{ inputs.dockerfile-changed }}"
+      echo "event-name: ${{ inputs.event-name }}"
+      echo "pr-number: ${{ inputs.pr-number }}"
+
+  - name: Download and load image artifact (PRs with Dockerfile changes)
+    if: inputs.event-name == 'pull_request' && inputs.dockerfile-changed == 'true'
+    uses: actions/download-artifact@v4
+    with:
+      name: gosssd-image-pr-${{ inputs.pr-number }}
+      path: /tmp
+
+  - name: Load image from artifact
+    if: inputs.event-name == 'pull_request' && inputs.dockerfile-changed == 'true'
+    shell: bash
+    run: docker load < /tmp/gosssd-image.tar.gz
+
+  - name: Log in to GHCR (for pulling image)
+    if: inputs.event-name != 'pull_request' || inputs.dockerfile-changed != 'true'
+    uses: docker/login-action@v3
+    with:
+      registry: ghcr.io
+      username: ${{ github.actor }}
+      password: ${{ inputs.github-token }}
+
+  - name: Pull image from GHCR
+    if: inputs.event-name != 'pull_request' || inputs.dockerfile-changed != 'true'
+    shell: bash
+    run: docker pull ${{ inputs.image }}
+
+  - name: Run command in container
+    shell: bash
+    run: |
+      DOCKER_ARGS="--rm \
+        --user ${{ inputs.user }} \
+        --mount type=bind,source=${{ github.workspace }},target=/workspaces/gosssd \
+        -w /workspaces/gosssd \
+        -e GOSSSD_FAIL_BUILD_REQUIRED"
+      if [[ "${{ inputs.privileged }}" == "true" ]]; then
+        DOCKER_ARGS="$DOCKER_ARGS --privileged"
+      fi
+      docker run $DOCKER_ARGS ${{ inputs.image }} bash -c "${{ inputs.command }}"

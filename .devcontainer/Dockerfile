@@ -32,6 +32,7 @@ RUN dnf -y update && \
     openldap-devel \
     krb5-devel \
     c-ares-devel \
+    python3-devel \
     pcre2-devel \
     dbus-devel \
     libdhash-devel \
@@ -49,21 +50,50 @@ RUN dnf -y update && \
     less \
     # Pre-commit and linting tools
     python3-pip \
-    nodejs \
-    npm \
     && dnf clean all
+
+# Install Node.js 20 from NodeSource
+RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && \
+    dnf -y install nodejs && \
+    dnf clean all
 
 # Set up Go environment
 ENV GOPATH=/go
 ENV PATH=$PATH:$GOPATH/bin:/usr/local/go/bin
 
-# Install Go tools for development
+# Create vscode user and Go directories
+RUN useradd -m -s /bin/bash -u 1001 vscode && \
+    mkdir -p /home/vscode/.cache /go && \
+    chown -R vscode:vscode /home/vscode /go
+
+# Install Go tools for development (as vscode user)
+USER vscode
 RUN go install golang.org/x/tools/gopls@latest && \
     go install github.com/securego/gosec/v2/cmd/gosec@latest && \
-    go install honnef.co/go/tools/cmd/staticcheck@latest
+    go install honnef.co/go/tools/cmd/staticcheck@latest && \
+    go install gotest.tools/gotestsum@latest && \
+    go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
-# Create workspace directory
+# Switch back to root for remaining setup
+USER root
+
+# Install pre-commit
+RUN python3 -m pip install --quiet pre-commit
+
+# Create workspace directory and install pre-commit hooks
 WORKDIR /workspace
+
+USER vscode
+# Copy pre-commit config and install hook environments
+COPY .pre-commit-config.yaml /tmp/
+RUN TMPDIR=$(mktemp -d) && \
+    cd "$TMPDIR" && \
+    git init && \
+    cp /tmp/.pre-commit-config.yaml . && \
+    pre-commit install-hooks && \
+    cd / && \
+    rm -rf "$TMPDIR"
+USER root
 
 # Keep container running
 CMD ["/bin/bash"]

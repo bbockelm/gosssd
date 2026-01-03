@@ -27,10 +27,10 @@ if [ -f "go.mod" ]; then
     go mod download
 fi
 
-# Install pre-commit and setup hooks
-echo "Installing pre-commit framework..."
-python3 -m pip install --quiet pre-commit
+# Setup pre-commit hooks (pre-commit is already installed in the container)
 if [ -f ".pre-commit-config.yaml" ]; then
+    echo "Installing pre-commit hook environments..."
+    pre-commit install-hooks
     pre-commit install
 fi
 
