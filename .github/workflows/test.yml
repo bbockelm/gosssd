@@ -5,6 +5,10 @@ on:
   push:
     branches: [main, master]
 
+permissions:
+  packages: write
+  contents: read
+
 jobs:
   build-container:
     uses: ./.github/workflows/build-container.yml
@@ -18,6 +22,20 @@ jobs:
         go-version: ['1.25']
     steps:
     - uses: actions/checkout@v4
+
+    - name: Download and load image artifact (PRs)
+      if: github.event_name == 'pull_request'
+      uses: actions/download-artifact@v4
+      with:
+        name: gosssd-image-pr-${{ github.event.number }}
+        path: /tmp
+
+    - name: Load image from artifact (PRs)
+      if: github.event_name == 'pull_request'
+      run: |
+        if [ -f /tmp/gosssd-image.tar.gz ]; then
+          docker load < /tmp/gosssd-image.tar.gz
+        fi
 
     - name: Run tests
       env:
