@@ -49,9 +49,12 @@ RUN dnf -y update && \
     less \
     # Pre-commit and linting tools
     python3-pip \
-    nodejs \
-    npm \
     && dnf clean all
+
+# Install Node.js 20 from NodeSource
+RUN curl -fsSL https://rpm.nodesource.com/setup_20.x | bash - && \
+    dnf -y install nodejs && \
+    dnf clean all
 
 # Set up Go environment
 ENV GOPATH=/go
