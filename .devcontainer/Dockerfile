@@ -32,6 +32,7 @@ RUN dnf -y update && \
     openldap-devel \
     krb5-devel \
     c-ares-devel \
+    python3-devel \
     pcre2-devel \
     dbus-devel \
     libdhash-devel \
@@ -82,6 +83,7 @@ RUN python3 -m pip install --quiet pre-commit
 # Create workspace directory and install pre-commit hooks
 WORKDIR /workspace
 
+USER vscode
 # Copy pre-commit config and install hook environments
 COPY .pre-commit-config.yaml /tmp/
 RUN TMPDIR=$(mktemp -d) && \
@@ -91,6 +93,7 @@ RUN TMPDIR=$(mktemp -d) && \
     pre-commit install-hooks && \
     cd / && \
     rm -rf "$TMPDIR"
+USER root
 
 # Keep container running
 CMD ["/bin/bash"]

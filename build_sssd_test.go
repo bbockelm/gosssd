@@ -9,8 +9,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"testing"
@@ -74,15 +76,35 @@ func BuildCustomSSSD(t *testing.T) (string, error) {
 		}
 		t.Logf("SSSD lock acquired")
 
+		// Determine current user for SSSD configuration
+		currentUser := "root"
+		if u, err := user.Current(); err == nil && u.Username != "" {
+			currentUser = u.Username
+		}
+
 		// Check if already built (after acquiring lock)
 		sssdBin := filepath.Join(installDir, "sbin", "sssd")
+		needsRebuild := false
 		if _, err := os.Stat(sssdBin); err == nil {
-			// Verify stamp file indicates successful build
+			// Verify stamp file indicates successful build and check if user changed
 			content, _ := os.ReadFile(stampFile)
-			if string(content) == "success" {
+			stampUser := string(content)
+			if stampUser == currentUser {
 				t.Logf("Using cached SSSD build at %s", installDir)
 				sssdBuildDir = installDir
 				sssdBuildSuccess = true
+				return
+			}
+			// User changed, need to rebuild
+			t.Logf("User changed from %s to %s, rebuilding SSSD...", stampUser, currentUser)
+			needsRebuild = true
+		}
+
+		// Clean up old installation if rebuilding
+		if needsRebuild {
+			t.Logf("Cleaning up old installation...")
+			if err := os.RemoveAll(installDir); err != nil {
+				sssdBuildErr = fmt.Errorf("failed to remove old installation: %w", err)
 				return
 			}
 		}
@@ -178,15 +200,71 @@ func BuildCustomSSSD(t *testing.T) (string, error) {
 
 		sssdSrcDir := filepath.Join(buildRoot, "sssd-2.9.7")
 
+		// Apply patches to remove UID/GID checks for non-root execution
+		t.Logf("Applying patches to SSSD source...")
+		patches := []struct {
+			file    string
+			old     string
+			new     string
+			comment string
+		}{
+			{
+				file:    "src/monitor/monitor.c",
+				old:     "    poptFreeContext(pc);\n\n    uid = getuid();\n    if (uid != 0) {\n        ERROR(\"Running under %\"PRIu64\", must be root\\n\", (uint64_t) uid);\n        sss_log(SSS_LOG_ALERT, \"sssd must be run as root\");\n        return 8;\n    }\n\n    tmp_ctx = talloc_new(NULL);",
+				new:     "    poptFreeContext(pc);\n\n    tmp_ctx = talloc_new(NULL);",
+				comment: "Remove root user check in monitor",
+			},
+			{
+				file:    "src/util/sss_ini.c",
+				old:     "        return EOK;\n    }\n\n    return ini_config_access_check(self->file,\n                                   INI_ACCESS_CHECK_MODE |\n                                   INI_ACCESS_CHECK_UID |\n                                   INI_ACCESS_CHECK_GID,\n                                   0, /* owned by root */\n                                   0, /* owned by root */\n                                   S_IRUSR, /* r**------ */\n                                   ALLPERMS & ~(S_IWUSR|S_IXUSR));\n}",
+				new:     "        return EOK;\n    }\n\n    return EOK;\n}",
+				comment: "Skip config file ownership checks",
+			},
+			{
+				file:    "src/util/server.c",
+				old:     "                  \"Cannot chown the debug files, debugging might not work!\\n\");\n        }\n\n        ret = become_user(uid, gid);\n        if (ret != EOK) {\n            DEBUG(SSSDBG_FUNC_DATA,\n                  \"Cannot become user [%\"SPRIuid\"][%\"SPRIgid\"].\\n\", uid, gid);\n            return ret;\n        }\n    }",
+				new:     "                  \"Cannot chown the debug files, debugging might not work!\\n\");\n        }\n\n        ret = EOK; // skip become_user\n    }",
+				comment: "Skip become_user call",
+			},
+			{
+				file:    "src/sbus/server/sbus_server.c",
+				old:     "        if (ret != EOK) {\n            ret = errno;\n            DEBUG(SSSDBG_CRIT_FAILURE, \"chmod failed for [%s] [%d]: %s\\n\",\n                  filename, ret, sss_strerror(ret));\n            return ret;\n        }\n    }\n\n    if (stat_buf.st_uid != uid || stat_buf.st_gid != gid) {\n        ret = chown(filename, uid, gid);\n        if (ret != EOK) {\n            ret = errno;\n            DEBUG(SSSDBG_CRIT_FAILURE, \"chown failed for [%s] [%d]: %s\\n\",\n                  filename, ret, sss_strerror(ret));\n            return ret;\n        }\n    }",
+				new:     "        if (ret != EOK) {\n            ret = errno;\n            DEBUG(SSSDBG_CRIT_FAILURE, \"chmod failed for [%s] [%d]: %s\\n\",\n                  filename, ret, sss_strerror(ret));\n            return ret;\n        }\n    }",
+				comment: "Skip socket file ownership check",
+			},
+		}
+
+		for _, patch := range patches {
+			filePath := filepath.Join(sssdSrcDir, patch.file)
+			t.Logf("Patching %s: %s", patch.file, patch.comment)
+
+			content, err := os.ReadFile(filePath)
+			if err != nil {
+				sssdBuildErr = fmt.Errorf("failed to read %s: %w", patch.file, err)
+				return
+			}
+
+			// Apply patch by replacing old text with new text
+			oldContent := string(content)
+			newContent := strings.Replace(oldContent, patch.old, patch.new, 1)
+
+			if oldContent == newContent {
+				sssdBuildErr = fmt.Errorf("patch failed for %s: old text not found", patch.file)
+				return
+			}
+
+			if err := os.WriteFile(filePath, []byte(newContent), 0644); err != nil {
+				sssdBuildErr = fmt.Errorf("failed to write patched %s: %w", patch.file, err)
+				return
+			}
+		}
+
 		// Configure with custom paths
 		t.Logf("Configuring SSSD build...")
-		currentUser := os.Getenv("USER")
-		if currentUser == "" {
-			currentUser = "root"
-		}
 
 		configureArgs := []string{
 			fmt.Sprintf("--prefix=%s", installDir),
+			fmt.Sprintf("--libdir=%s/lib", installDir),
 			fmt.Sprintf("--with-db-path=%s/db", installDir),
 			fmt.Sprintf("--with-pid-path=%s/run", installDir),
 			fmt.Sprintf("--with-log-path=%s/log", installDir),
@@ -194,6 +272,7 @@ func BuildCustomSSSD(t *testing.T) (string, error) {
 			fmt.Sprintf("--with-pubconf-path=%s/etc", installDir),
 			fmt.Sprintf("--with-mcache-path=%s/mcache", installDir),
 			fmt.Sprintf("--with-ldb-lib-dir=%s/lib/ldb", installDir),
+			fmt.Sprintf("--with-app-libs=%s/lib", installDir),
 		}
 
 		// Only set --with-sssd-user for non-root users
@@ -204,7 +283,10 @@ func BuildCustomSSSD(t *testing.T) (string, error) {
 		configureArgs = append(configureArgs,
 			"--disable-cifs-idmap-plugin",
 			"--without-python2-bindings",
-			"--without-python3-bindings",
+			// sssd has a bug where, if python3 is not built, then
+			// it tries to install the analyzer to /modules/sssd
+			// instead
+			"--with-python3-bindings",
 			"--without-selinux",
 			"--without-semanage",
 			"--disable-krb5-locator-plugin",
@@ -272,8 +354,8 @@ func BuildCustomSSSD(t *testing.T) (string, error) {
 			}
 		}
 
-		// Write stamp file to indicate successful build
-		if err := os.WriteFile(stampFile, []byte("success"), 0644); err != nil {
+		// Write stamp file with username to indicate successful build
+		if err := os.WriteFile(stampFile, []byte(currentUser), 0644); err != nil {
 			sssdBuildErr = fmt.Errorf("failed to write stamp file: %w", err)
 			return
 		}
