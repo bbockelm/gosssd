@@ -1,0 +1,59 @@
+name: Run in Container
+description: Run a command inside the dev container, handling artifact loading or registry pull
+
+inputs:
+  image:
+    description: Container image name to use
+    required: true
+  dockerfile-changed:
+    description: Whether the Dockerfile changed (true/false)
+    required: true
+  pr-number:
+    description: Pull request number (if applicable)
+    required: false
+  command:
+    description: Command to run inside the container
+    required: true
+  privileged:
+    description: Run container in privileged mode
+    required: false
+    default: 'false'
+  user:
+    description: User to run as inside the container
+    required: false
+    default: vscode
+  github-token:
+    description: GitHub token for GHCR authentication
+    required: true
+
+runs:
+  using: composite
+  steps:
+  - name: Download and load image artifact (PRs with Dockerfile changes)
+    if: github.event_name == 'pull_request' && inputs.dockerfile-changed == 'true'
+    uses: actions/download-artifact@v4
+    with:
+      name: gosssd-image-pr-${{ inputs.pr-number }}
+      path: /tmp
+
+  - name: Load image from artifact
+    if: github.event_name == 'pull_request' && inputs.dockerfile-changed == 'true'
+    shell: bash
+    run: docker load < /tmp/gosssd-image.tar.gz
+
+  - name: Log in to GHCR (for pulling image)
+    if: github.event_name != 'pull_request' || inputs.dockerfile-changed != 'true'
+    uses: docker/login-action@v3
+    with:
+      registry: ghcr.io
+      username: ${{ github.actor }}
+      password: ${{ inputs.github-token }}
+
+  - name: Run command in container
+    shell: bash
+    run: |
+      DOCKER_ARGS="--rm --user ${{ inputs.user }} -v ${{ github.workspace }}:/workspaces/gosssd -w /workspaces/gosssd"
+      if [[ "${{ inputs.privileged }}" == "true" ]]; then
+        DOCKER_ARGS="$DOCKER_ARGS --privileged"
+      fi
+      docker run $DOCKER_ARGS ${{ inputs.image }} bash -c "${{ inputs.command }}"

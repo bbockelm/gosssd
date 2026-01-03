@@ -47,7 +47,7 @@ jobs:
       packages: write
     outputs:
       image: ${{ steps.image.outputs.name }}
-    if: needs.detect-changes.outputs.dockerfile-changed == 'true' || github.event_name == 'schedule' || github.event_name == 'pull_request'
+      dockerfile-changed: ${{ needs.detect-changes.outputs.dockerfile-changed }}
     steps:
     - uses: actions/checkout@v4
 
@@ -63,7 +63,7 @@ jobs:
         password: ${{ secrets.GITHUB_TOKEN }}
 
     - name: Build and push image (main branch)
-      if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master'
+      if: (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master') && (needs.detect-changes.outputs.dockerfile-changed == 'true' || github.event_name == 'schedule')
       uses: docker/build-push-action@v6
       with:
         context: .
@@ -74,7 +74,7 @@ jobs:
         cache-to: type=gha,mode=max
 
     - name: Build and load image (PRs)
-      if: github.event_name == 'pull_request'
+      if: github.event_name == 'pull_request' && needs.detect-changes.outputs.dockerfile-changed == 'true'
       uses: docker/build-push-action@v6
       with:
         context: .
@@ -102,7 +102,11 @@ jobs:
       id: image
       run: |
         if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-          echo "name=gosssd-dev:pr-${{ github.event.number }}" >> $GITHUB_OUTPUT
+          if [[ "${{ needs.detect-changes.outputs.dockerfile-changed }}" == "true" ]]; then
+            echo "name=gosssd-dev:pr-${{ github.event.number }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=ghcr.io/${{ github.repository }}:latest" >> $GITHUB_OUTPUT
+          fi
         else
           echo "name=ghcr.io/${{ github.repository }}:latest" >> $GITHUB_OUTPUT
         fi

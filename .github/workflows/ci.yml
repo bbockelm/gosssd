@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  packages: write
+  contents: read
+
+jobs:
+  build-container:
+    uses: ./.github/workflows/build-container.yml
+
+  pre-commit:
+    needs: build-container
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run pre-commit
+      uses: ./.github/actions/run-in-container
+      with:
+        image: ${{ needs.build-container.outputs.image }}
+        dockerfile-changed: ${{ needs.build-container.outputs.dockerfile-changed }}
+        pr-number: ${{ github.event.number }}
+        command: pre-commit run --all-files
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    needs: build-container
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        go-version: ['1.25']
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Run tests
+      uses: ./.github/actions/run-in-container
+      with:
+        image: ${{ needs.build-container.outputs.image }}
+        dockerfile-changed: ${{ needs.build-container.outputs.dockerfile-changed }}
+        pr-number: ${{ github.event.number }}
+        command: gotestsum --format=testname -- -race -coverprofile=coverage.txt -covermode=atomic ./...
+        privileged: 'true'
+        github-token: ${{ secrets.GITHUB_TOKEN }}
+      env:
+        GOSSSD_FAIL_BUILD_REQUIRED: 'true'
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.txt
+        flags: unittests
+        fail_ci_if_error: false

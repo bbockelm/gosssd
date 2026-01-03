@@ -57,12 +57,21 @@ RUN dnf -y update && \
 ENV GOPATH=/go
 ENV PATH=$PATH:$GOPATH/bin:/usr/local/go/bin
 
-# Install Go tools for development
+# Create vscode user
+RUN useradd -m -s /bin/bash -u 1000 vscode && \
+    mkdir -p /home/vscode/.cache && \
+    chown -R vscode:vscode /home/vscode
+
+# Install Go tools for development (as vscode user)
+USER vscode
 RUN go install golang.org/x/tools/gopls@latest && \
     go install github.com/securego/gosec/v2/cmd/gosec@latest && \
     go install honnef.co/go/tools/cmd/staticcheck@latest && \
     go install gotest.tools/gotestsum@latest && \
     go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
+
+# Switch back to root for remaining setup
+USER root
 
 # Install pre-commit
 RUN python3 -m pip install --quiet pre-commit
@@ -72,7 +81,13 @@ WORKDIR /workspace
 
 # Copy pre-commit config and install hook environments
 COPY .pre-commit-config.yaml /tmp/
-RUN cd /tmp && pre-commit install-hooks || true
+RUN TMPDIR=$(mktemp -d) && \
+    cd "$TMPDIR" && \
+    git init && \
+    cp /tmp/.pre-commit-config.yaml . && \
+    pre-commit install-hooks && \
+    cd / && \
+    rm -rf "$TMPDIR"
 
 # Keep container running
 CMD ["/bin/bash"]
