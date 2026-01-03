@@ -67,7 +67,7 @@ jobs:
       uses: docker/build-push-action@v6
       with:
         context: .
-        dockerfile: .devcontainer/Dockerfile
+        file: .devcontainer/Dockerfile
         push: true
         tags: ghcr.io/${{ github.repository }}:latest
         cache-from: type=gha
@@ -78,7 +78,7 @@ jobs:
       uses: docker/build-push-action@v6
       with:
         context: .
-        dockerfile: .devcontainer/Dockerfile
+        file: .devcontainer/Dockerfile
         load: true
         tags: gosssd-dev:pr-${{ github.event.number }}
         cache-from: type=gha
