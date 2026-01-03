@@ -61,7 +61,7 @@ ENV GOPATH=/go
 ENV PATH=$PATH:$GOPATH/bin:/usr/local/go/bin
 
 # Create vscode user and Go directories
-RUN useradd -m -s /bin/bash -u 1000 vscode && \
+RUN useradd -m -s /bin/bash -u 1001 vscode && \
     mkdir -p /home/vscode/.cache /go && \
     chown -R vscode:vscode /home/vscode /go
 
