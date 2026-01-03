@@ -29,6 +29,8 @@ fi
 
 # Setup pre-commit hooks (pre-commit is already installed in the container)
 if [ -f ".pre-commit-config.yaml" ]; then
+    echo "Installing pre-commit hook environments..."
+    pre-commit install-hooks
     pre-commit install
 fi
 
