@@ -52,6 +52,7 @@ jobs:
     - uses: actions/checkout@v4
 
     - name: Set up Docker Buildx
+      if: needs.detect-changes.outputs.dockerfile-changed == 'true' || github.event_name == 'schedule'
       uses: docker/setup-buildx-action@v3
 
     - name: Log in to GHCR (main branch only)
