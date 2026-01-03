@@ -2,6 +2,13 @@ name: Build Container
 
 on:
   workflow_call:
+    outputs:
+      image:
+        description: Container image name
+        value: ${{ jobs.build.outputs.image }}
+      dockerfile-changed:
+        description: Whether Dockerfile changed
+        value: ${{ jobs.build.outputs.dockerfile-changed }}
   schedule:
   - cron: 0 0 * * 0      # Weekly on Sunday at midnight UTC
   push:
@@ -51,6 +58,19 @@ jobs:
     steps:
     - uses: actions/checkout@v4
 
+    - name: Set image output
+      id: image
+      run: |
+        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+          if [[ "${{ needs.detect-changes.outputs.dockerfile-changed }}" == "true" ]]; then
+            echo "name=gosssd-dev:pr-${{ github.event.number }}" >> $GITHUB_OUTPUT
+          else
+            echo "name=ghcr.io/${{ github.repository }}:latest" >> $GITHUB_OUTPUT
+          fi
+        else
+          echo "name=ghcr.io/${{ github.repository }}:latest" >> $GITHUB_OUTPUT
+        fi
+
     - name: Set up Docker Buildx
       if: needs.detect-changes.outputs.dockerfile-changed == 'true' || github.event_name == 'schedule'
       uses: docker/setup-buildx-action@v3
@@ -98,16 +118,3 @@ jobs:
         name: gosssd-image-pr-${{ github.event.number }}
         path: /tmp/gosssd-image.tar.gz
         retention-days: 1
-
-    - name: Set image output
-      id: image
-      run: |
-        if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-          if [[ "${{ needs.detect-changes.outputs.dockerfile-changed }}" == "true" ]]; then
-            echo "name=gosssd-dev:pr-${{ github.event.number }}" >> $GITHUB_OUTPUT
-          else
-            echo "name=ghcr.io/${{ github.repository }}:latest" >> $GITHUB_OUTPUT
-          fi
-        else
-          echo "name=ghcr.io/${{ github.repository }}:latest" >> $GITHUB_OUTPUT
-        fi
