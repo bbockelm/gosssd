@@ -61,11 +61,11 @@ ENV PATH=$PATH:$GOPATH/bin:/usr/local/go/bin
 RUN go install golang.org/x/tools/gopls@latest && \
     go install github.com/securego/gosec/v2/cmd/gosec@latest && \
     go install honnef.co/go/tools/cmd/staticcheck@latest && \
-    go install gotest.tools/gotestsum@latest
+    go install gotest.tools/gotestsum@latest && \
+    go install github.com/golangci/golangci-lint/cmd/golangci-lint@latest
 
 # Install pre-commit
-RUN python3 -m pip install --quiet pre-commit && \
-    python3 -m pip install --quiet golangci-lint
+RUN python3 -m pip install --quiet pre-commit
 
 # Create workspace directory and install pre-commit hooks
 WORKDIR /workspace
