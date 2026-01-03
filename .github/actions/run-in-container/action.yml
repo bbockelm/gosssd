@@ -68,7 +68,11 @@ runs:
   - name: Run command in container
     shell: bash
     run: |
-      DOCKER_ARGS="--rm --user ${{ inputs.user }} -v ${{ github.workspace }}:/workspaces/gosssd -w /workspaces/gosssd"
+      DOCKER_ARGS="--rm \
+        --user ${{ inputs.user }} \
+        --mount type=bind,source=${{ github.workspace }},target=/workspaces/gosssd,idmap=true \
+        -w /workspaces/gosssd \
+        -e GOSSSD_FAIL_BUILD_REQUIRED"
       if [[ "${{ inputs.privileged }}" == "true" ]]; then
         DOCKER_ARGS="$DOCKER_ARGS --privileged"
       fi
