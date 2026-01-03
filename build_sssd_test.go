@@ -34,6 +34,8 @@ var (
 // The build is cached and only done once per test run.
 // This function acquires and holds a lock for the entire test session since
 // only one test can use the SSSD pipes at a time.
+// If the GOSSSD_FAIL_BUILD_REQUIRED environment variable is set to "true",
+// build failures will cause test failures instead of being skipped.
 func BuildCustomSSSD(t *testing.T) (string, error) {
 	t.Helper()
 

@@ -26,13 +26,18 @@ type TestSSSD struct {
 }
 
 // SetupTestSSSD creates and starts a self-contained SSSD instance for testing.
-// Returns nil if sssd is not available (skips test gracefully).
+// Returns nil if sssd is not available.
+// If GOSSSD_FAIL_BUILD_REQUIRED is set to "true", build failures will cause test failures.
+// Otherwise, build failures cause the test to skip gracefully.
 func SetupTestSSSD(t *testing.T) *TestSSSD {
 	t.Helper()
 
 	// Build custom SSSD with custom paths
 	sssdInstallDir, err := BuildCustomSSSD(t)
 	if err != nil {
+		if os.Getenv("GOSSSD_FAIL_BUILD_REQUIRED") == "true" {
+			t.Fatalf("Failed to build custom SSSD: %v", err)
+		}
 		t.Skipf("Failed to build custom SSSD: %v", err)
 		return nil
 	}

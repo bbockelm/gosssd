@@ -60,10 +60,19 @@ ENV PATH=$PATH:$GOPATH/bin:/usr/local/go/bin
 # Install Go tools for development
 RUN go install golang.org/x/tools/gopls@latest && \
     go install github.com/securego/gosec/v2/cmd/gosec@latest && \
-    go install honnef.co/go/tools/cmd/staticcheck@latest
+    go install honnef.co/go/tools/cmd/staticcheck@latest && \
+    go install gotest.tools/gotestsum@latest
 
-# Create workspace directory
+# Install pre-commit
+RUN python3 -m pip install --quiet pre-commit && \
+    python3 -m pip install --quiet golangci-lint
+
+# Create workspace directory and install pre-commit hooks
 WORKDIR /workspace
+
+# Copy pre-commit config and install hook environments
+COPY .pre-commit-config.yaml /tmp/
+RUN cd /tmp && pre-commit install-hooks || true
 
 # Keep container running
 CMD ["/bin/bash"]
