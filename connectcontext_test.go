@@ -4,6 +4,7 @@ import (
 	"context"
 	"net"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,18 +68,7 @@ func TestRequestAfterConnectContext(t *testing.T) {
 	if err == nil {
 		t.Skip("stub unexpectedly satisfied the request")
 	}
-	if got := err.Error(); contains(got, "not connected") {
+	if got := err.Error(); strings.Contains(got, "not connected") {
 		t.Fatalf("request after a successful ConnectContext failed with %q", got)
 	}
-}
-
-func contains(haystack, needle string) bool {
-	return len(haystack) >= len(needle) && (func() bool {
-		for i := 0; i+len(needle) <= len(haystack); i++ {
-			if haystack[i:i+len(needle)] == needle {
-				return true
-			}
-		}
-		return false
-	})()
 }
