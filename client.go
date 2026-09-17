@@ -64,11 +64,25 @@ func NewClient(opts ...ClientOption) *Client {
 
 // Connect establishes a connection to the SSSD socket
 func (c *Client) Connect() error {
+	return c.connect(nil)
+}
+
+// connect dials and stores the connection on THIS client. dialCtxOverride,
+// when non-nil, is used for dialing and for the lifecycle watcher in place
+// of any context stored on the client.
+func (c *Client) connect(dialCtxOverride context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	if c.ctx != nil {
-		if err := c.ctx.Err(); err != nil {
+	// The effective context: an explicit one from ConnectContext, else
+	// whatever WithContext stored.
+	effCtx := c.ctx
+	if dialCtxOverride != nil {
+		effCtx = dialCtxOverride
+	}
+
+	if effCtx != nil {
+		if err := effCtx.Err(); err != nil {
 			return err
 		}
 	}
@@ -78,7 +92,7 @@ func (c *Client) Connect() error {
 	}
 
 	// Prefer dialing with context when available; otherwise fall back to timeout.
-	dialCtx := c.ctx
+	dialCtx := effCtx
 	if dialCtx == nil {
 		dialCtx = context.Background()
 	}
@@ -102,37 +116,23 @@ func (c *Client) Connect() error {
 	}
 
 	c.conn = conn
-	if c.ctx != nil && !c.ctxWatcherStarted {
+	if effCtx != nil && !c.ctxWatcherStarted {
 		c.ctxWatcherStarted = true
-		go c.closeOnContextDone(c.ctx)
+		go c.closeOnContextDone(effCtx)
 	}
 	return nil
 }
 
 // ConnectContext establishes a connection using the provided context for dialing
 // and for managing the lifecycle of the connection (socket will be closed when
-// ctx is done). This is a convenience wrapper that avoids storing the context
-// on the client.
+// ctx is done). The context is not stored on the client.
+//
+// It connects THIS client. It previously dialed a shallow copy, so the
+// connection was stored on a throwaway value and the caller's client was
+// left with a nil conn: ConnectContext returned success and every request
+// afterwards failed with "not connected".
 func (c *Client) ConnectContext(ctx context.Context) error {
-	return c.withContext(ctx).Connect()
-}
-
-// withContext returns a shallow copy of the client that uses the provided context.
-// Internal helper to keep ConnectContext a thin wrapper without changing the
-// original client's stored context.
-func (c *Client) withContext(ctx context.Context) *Client {
-	c.mu.Lock()
-	// Create a new client with the same fields to avoid copying the mutex.
-	clone := &Client{
-		socketPath:        c.socketPath,
-		conn:              c.conn,
-		timeout:           c.timeout,
-		ctx:               ctx,
-		ctxWatcherStarted: false,
-	}
-	c.mu.Unlock()
-
-	return clone
+	return c.connect(ctx)
 }
 
 // Close closes the connection to SSSD
