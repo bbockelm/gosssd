@@ -3,6 +3,7 @@
 package gosssd
 
 import (
+	"context"
 	"strconv"
 	"testing"
 	"time"
@@ -205,4 +206,63 @@ func TestIntegrationGetGroupsForUser(t *testing.T) {
 		t.Errorf("Expected primary group %d in list, got: %v", expectedGID, gids)
 	}
 	t.Logf("User %s is in groups: %v", ts.TestUser.Username, gids)
+}
+
+// TestIntegrationConnectContextThenGetGroups covers ConnectContext
+// against a real SSSD.
+//
+// Every other integration test here connects with Connect(), which was
+// always correct. ConnectContext dialed a shallow copy of the client and
+// stored the socket on that copy, so it reported success while leaving
+// the caller's client unconnected and every later request failing with
+// "not connected". The harness was pointed exclusively at the working
+// path, so a real SSSD, a real group lookup, and a passing CI run all
+// coexisted with a client that could not be used this way at all.
+//
+// This is deliberately the same assertion as
+// TestIntegrationGetGroupsForUser, differing only in how the connection
+// is established -- which is the whole of what went wrong.
+func TestIntegrationConnectContextThenGetGroups(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ts := SetupTestSSSD(t)
+	if ts == nil {
+		return
+	}
+	defer ts.Cleanup()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	client := NewClient(
+		WithSocketPath(ts.SocketPath),
+		WithTimeout(5*time.Second),
+	)
+
+	if err := client.ConnectContext(ctx); err != nil {
+		t.Fatalf("ConnectContext failed: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	gids, err := client.GetGroupsForUser(ts.TestUser.Username)
+	if err != nil {
+		// The pre-fix failure mode, named so a regression is unambiguous.
+		t.Fatalf("GetGroupsForUser after ConnectContext failed: %v "+
+			"(a \"not connected\" error here means ConnectContext left the client unconnected)", err)
+	}
+
+	expectedGID, _ := strconv.ParseUint(ts.TestUser.Gid, 10, 32)
+	found := false
+	for _, gid := range gids {
+		if gid == uint32(expectedGID) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Errorf("Expected primary group %d in list, got: %v", expectedGID, gids)
+	}
+	t.Logf("ConnectContext: user %s is in groups: %v", ts.TestUser.Username, gids)
 }
