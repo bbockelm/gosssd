@@ -266,3 +266,78 @@ func TestIntegrationConnectContextThenGetGroups(t *testing.T) {
 	}
 	t.Logf("ConnectContext: user %s is in groups: %v", ts.TestUser.Username, gids)
 }
+
+// Enumeration is the one call whose answer depends on the domain's
+// `enumerate` setting, so it is worth exercising against a real SSSD
+// rather than only a mock: the mock cannot tell us whether the
+// SETPWENT/GETPWENT/ENDPWENT exchange is the one SSSD expects.
+func TestIntegrationEnumerateUsers(t *testing.T) {
+	if testing.Short() {
+		t.Skip("Skipping integration test in short mode")
+	}
+
+	ts := SetupTestSSSD(t)
+	if ts == nil {
+		return // sssd not available, test was skipped
+	}
+	defer ts.Cleanup()
+
+	client := NewClient(
+		WithSocketPath(ts.SocketPath),
+		WithTimeout(10*time.Second),
+	)
+	if err := client.Connect(); err != nil {
+		t.Fatalf("Failed to connect to test SSSD: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	users, err := client.EnumerateUsers()
+	if err != nil {
+		t.Fatalf("EnumerateUsers failed: %v", err)
+	}
+	if len(users) == 0 {
+		t.Fatal("enumeration returned nobody; the test domain sets enumerate = true")
+	}
+
+	// The account the harness created must be among them, with the same
+	// fields a by-name lookup reports -- enumeration that returned
+	// differently-shaped entries would be worse than none.
+	byName, err := client.GetUserByName(ts.TestUser.Username)
+	if err != nil {
+		t.Fatalf("GetUserByName failed: %v", err)
+	}
+
+	var found *User
+	for _, u := range users {
+		if u.Name == ts.TestUser.Username {
+			found = u
+			break
+		}
+	}
+	if found == nil {
+		names := make([]string, 0, len(users))
+		for _, u := range users {
+			names = append(names, u.Name)
+		}
+		t.Fatalf("enumeration did not include %q; got %v", ts.TestUser.Username, names)
+	}
+	if found.UID != byName.UID || found.GID != byName.GID {
+		t.Errorf("enumerated %s as uid=%d gid=%d, by-name says uid=%d gid=%d",
+			found.Name, found.UID, found.GID, byName.UID, byName.GID)
+	}
+	if found.Gecos != byName.Gecos || found.HomeDir != byName.HomeDir || found.Shell != byName.Shell {
+		t.Errorf("enumerated entry differs from the by-name lookup:\n  enum: %+v\n  name: %+v", found, byName)
+	}
+
+	// Enumeration keeps per-connection state in SSSD. A second pass on the
+	// same client must start from the beginning, not resume where the first
+	// stopped -- that is what ENDPWENT is for.
+	again, err := client.EnumerateUsers()
+	if err != nil {
+		t.Fatalf("second EnumerateUsers failed: %v", err)
+	}
+	if len(again) != len(users) {
+		t.Errorf("second enumeration returned %d users, first returned %d; the cursor was not reset",
+			len(again), len(users))
+	}
+}

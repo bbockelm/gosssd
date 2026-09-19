@@ -174,66 +174,87 @@ func UnmarshalUser(data []byte) (*User, error) {
 		return nil, fmt.Errorf("response too short for header: %d bytes", len(data))
 	}
 
-	// Parse number of results
 	numResults := binary.LittleEndian.Uint32(data[0:4])
 	if numResults == 0 {
 		return nil, fmt.Errorf("no results found")
 	}
-	if numResults > 1 {
-		// Just use the first result
-		fmt.Fprintf(os.Stderr, "[DEBUG] Multiple results (%d), using first\n", numResults)
+
+	// Skip the reserved field; entries follow.
+	user, _, err := unmarshalUserAt(data, 8)
+	if err != nil {
+		return nil, err
+	}
+	return user, nil
+}
+
+// UnmarshalUsers parses every passwd entry in a reply.
+//
+// The wire format already packs a count and N entries back to back --
+// UnmarshalUser reads the count and returns only the first. Enumeration
+// replies are the case where the rest matter: one GETPWENT returns a batch.
+//
+// A zero count is not an error here. It is how SSSD says the enumeration
+// is finished, which the caller needs to be able to tell from a failure.
+func UnmarshalUsers(data []byte) ([]*User, error) {
+	if len(data) < 8 {
+		return nil, fmt.Errorf("response too short for header: %d bytes", len(data))
 	}
 
-	// Skip reserved field
-	offset := 8
+	numResults := int(binary.LittleEndian.Uint32(data[0:4]))
+	if numResults == 0 {
+		return nil, nil
+	}
 
+	users := make([]*User, 0, numResults)
+	offset := 8 // past count and reserved
+	for i := 0; i < numResults; i++ {
+		user, next, err := unmarshalUserAt(data, offset)
+		if err != nil {
+			return nil, fmt.Errorf("entry %d of %d: %w", i+1, numResults, err)
+		}
+		users = append(users, user)
+		offset = next
+	}
+	return users, nil
+}
+
+// unmarshalUserAt parses one passwd entry beginning at offset and reports
+// where the next one starts.
+//
+// Layout: uid (4), gid (4), then five NUL-terminated strings -- name,
+// passwd, gecos, home directory, shell.
+func unmarshalUserAt(data []byte, offset int) (*User, int, error) {
 	user := &User{}
 
-	// Parse UID
 	if len(data) < offset+4 {
-		return nil, fmt.Errorf("not enough data for UID")
+		return nil, 0, fmt.Errorf("not enough data for UID")
 	}
 	user.UID = binary.LittleEndian.Uint32(data[offset : offset+4])
 	offset += 4
 
-	// Parse GID
 	if len(data) < offset+4 {
-		return nil, fmt.Errorf("not enough data for GID")
+		return nil, 0, fmt.Errorf("not enough data for GID")
 	}
 	user.GID = binary.LittleEndian.Uint32(data[offset : offset+4])
 	offset += 4
 
-	// Parse the 5 null-terminated strings: name, passwd, gecos, dir, shell
 	var err error
-
-	user.Name, offset, err = unmarshalCString(data, offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse name: %w", err)
+	if user.Name, offset, err = unmarshalCString(data, offset); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse name: %w", err)
 	}
-
-	user.Passwd, offset, err = unmarshalCString(data, offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse passwd: %w", err)
+	if user.Passwd, offset, err = unmarshalCString(data, offset); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse passwd: %w", err)
 	}
-
-	user.Gecos, offset, err = unmarshalCString(data, offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse gecos: %w", err)
+	if user.Gecos, offset, err = unmarshalCString(data, offset); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse gecos: %w", err)
 	}
-
-	user.HomeDir, offset, err = unmarshalCString(data, offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse home dir: %w", err)
+	if user.HomeDir, offset, err = unmarshalCString(data, offset); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse home dir: %w", err)
 	}
-
-	var shellOffset int
-	user.Shell, shellOffset, err = unmarshalCString(data, offset)
-	if err != nil {
-		return nil, fmt.Errorf("failed to parse shell: %w", err)
+	if user.Shell, offset, err = unmarshalCString(data, offset); err != nil {
+		return nil, 0, fmt.Errorf("failed to parse shell: %w", err)
 	}
-	_ = shellOffset // offset is used for potential future parsing
-
-	return user, nil
+	return user, offset, nil
 }
 
 // unmarshalCString reads a null-terminated C string from data at offset

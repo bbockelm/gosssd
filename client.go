@@ -375,3 +375,53 @@ func (c *Client) closeOnContextDone(ctx context.Context) {
 func isConnClosed(err error) bool {
 	return errors.Is(err, net.ErrClosed) || errors.Is(err, io.ErrClosedPipe)
 }
+
+// enumBatchSize is how many passwd entries one GETPWENT asks for.
+//
+// SSSD caps what it returns regardless, so this is an upper bound on the
+// batch rather than a promise; it trades round trips against the size of a
+// single reply.
+const enumBatchSize = 100
+
+// EnumerateUsers returns every user SSSD is willing to enumerate.
+//
+// This is SETPWENT / GETPWENT / ENDPWENT -- the same exchange getpwent(3)
+// drives through the NSS module -- so it answers only when the SSSD domain
+// sets `enumerate = true`. That is off by default and discouraged for large
+// directories, and when it is off this returns no users rather than an
+// error: SSSD simply reports the enumeration finished immediately, which is
+// indistinguishable on the wire from a domain with nobody in it.
+//
+// Every entry is held in memory. For a directory of a few thousand accounts
+// that is a few hundred kilobytes; for a very large one, prefer looking
+// accounts up by name.
+func (c *Client) EnumerateUsers() ([]*User, error) {
+	if _, err := c.sendRequest(SSS_NSS_SETPWENT, nil); err != nil {
+		return nil, fmt.Errorf("SETPWENT failed: %w", err)
+	}
+	// End the enumeration whatever happens: SSSD keeps per-connection state
+	// for it, and abandoning that leaves the next caller reading from the
+	// middle of this one's cursor.
+	defer func() { _, _ = c.sendRequest(SSS_NSS_ENDPWENT, nil) }()
+
+	var users []*User
+	for {
+		req := make([]byte, 4)
+		binary.LittleEndian.PutUint32(req, enumBatchSize)
+
+		resp, err := c.sendRequest(SSS_NSS_GETPWENT, req)
+		if err != nil {
+			return nil, fmt.Errorf("GETPWENT failed after %d users: %w", len(users), err)
+		}
+
+		batch, err := UnmarshalUsers(resp.Data)
+		if err != nil {
+			return nil, fmt.Errorf("parsing batch after %d users: %w", len(users), err)
+		}
+		if len(batch) == 0 {
+			// A zero count is how SSSD says the enumeration is complete.
+			return users, nil
+		}
+		users = append(users, batch...)
+	}
+}
