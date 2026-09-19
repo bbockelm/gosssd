@@ -245,3 +245,94 @@ func TestUnmarshalGroup(t *testing.T) {
 		}
 	}
 }
+
+// packUsers builds a reply carrying n entries, the way SSSD packs one.
+func packUsers(users ...*User) []byte {
+	buf := bytes.NewBuffer(nil)
+
+	count := make([]byte, 4)
+	binary.LittleEndian.PutUint32(count, uint32(len(users)))
+	buf.Write(count)
+	buf.Write(make([]byte, 4)) // reserved
+
+	for _, u := range users {
+		n := make([]byte, 4)
+		binary.LittleEndian.PutUint32(n, u.UID)
+		buf.Write(n)
+		binary.LittleEndian.PutUint32(n, u.GID)
+		buf.Write(n)
+		for _, s := range []string{u.Name, u.Passwd, u.Gecos, u.HomeDir, u.Shell} {
+			buf.WriteString(s)
+			buf.WriteByte(0)
+		}
+	}
+	return buf.Bytes()
+}
+
+// A GETPWENT reply carries a batch. Parsing only the first entry -- which
+// is what UnmarshalUser does, deliberately -- would silently drop the rest
+// of every enumeration.
+func TestUnmarshalUsersParsesEveryEntry(t *testing.T) {
+	want := []*User{
+		{Name: "alice", Passwd: "x", UID: 1000, GID: 1000, Gecos: "Alice A", HomeDir: "/home/alice", Shell: "/bin/bash"},
+		{Name: "bob", Passwd: "x", UID: 1001, GID: 1001, Gecos: "", HomeDir: "/home/bob", Shell: "/bin/sh"},
+		{Name: "carol", Passwd: "x", UID: 1002, GID: 2002, Gecos: "Carol C", HomeDir: "/home/carol", Shell: "/bin/zsh"},
+	}
+
+	got, err := UnmarshalUsers(packUsers(want...))
+	if err != nil {
+		t.Fatalf("UnmarshalUsers: %v", err)
+	}
+	if len(got) != len(want) {
+		t.Fatalf("parsed %d entries, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if *got[i] != *want[i] {
+			t.Errorf("entry %d:\n  got  %+v\n  want %+v", i, *got[i], *want[i])
+		}
+	}
+}
+
+// Zero entries is how SSSD says an enumeration is finished. It must be
+// distinguishable from a failure, or the loop cannot tell "done" from
+// "broken" and would either spin or abort early.
+func TestUnmarshalUsersTreatsZeroAsEndNotError(t *testing.T) {
+	got, err := UnmarshalUsers(packUsers())
+	if err != nil {
+		t.Errorf("a zero count is the end of enumeration, not an error: %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("got %d entries, want none", len(got))
+	}
+}
+
+// A reply claiming more entries than it carries must fail rather than
+// return the entries it managed to read: a short read that looks like a
+// complete answer is how an enumeration silently loses accounts.
+func TestUnmarshalUsersRejectsATruncatedBatch(t *testing.T) {
+	data := packUsers(
+		&User{Name: "alice", UID: 1000, GID: 1000, HomeDir: "/home/alice", Shell: "/bin/bash"},
+		&User{Name: "bob", UID: 1001, GID: 1001, HomeDir: "/home/bob", Shell: "/bin/sh"},
+	)
+	// Claim three, carry two.
+	binary.LittleEndian.PutUint32(data[0:4], 3)
+
+	if _, err := UnmarshalUsers(data); err == nil {
+		t.Error("a truncated batch was accepted")
+	}
+}
+
+// UnmarshalUser keeps its existing contract: the first entry only.
+func TestUnmarshalUserStillReturnsTheFirstOfMany(t *testing.T) {
+	data := packUsers(
+		&User{Name: "alice", UID: 1000, GID: 1000, HomeDir: "/home/alice", Shell: "/bin/bash"},
+		&User{Name: "bob", UID: 1001, GID: 1001, HomeDir: "/home/bob", Shell: "/bin/sh"},
+	)
+	u, err := UnmarshalUser(data)
+	if err != nil {
+		t.Fatalf("UnmarshalUser: %v", err)
+	}
+	if u.Name != "alice" {
+		t.Errorf("got %q, want the first entry", u.Name)
+	}
+}
