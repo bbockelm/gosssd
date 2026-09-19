@@ -22,6 +22,11 @@ type Client struct {
 	timeout           time.Duration
 	ctx               context.Context
 	ctxWatcherStarted bool
+
+	// retries is how many EXTRA attempts a request gets when the link to
+	// SSSD is not working, and retryWait is the pause between them.
+	retries   int
+	retryWait time.Duration
 }
 
 // ClientOption is a function that configures a Client
@@ -41,6 +46,27 @@ func WithSocketPath(path string) ClientOption {
 	}
 }
 
+// WithRetry sets how many extra attempts a request gets when the socket
+// is unreachable, and how long to wait between them.
+//
+// The default is modest on purpose. SSSD is a local daemon whose socket
+// routinely appears a moment after a process starts -- in a container the
+// two start together -- and which is restarted by config reloads and by
+// supervisors. Those are ordinary events, not failures a caller should
+// have to code around.
+//
+// Zero attempts restores the previous behaviour: one try, and a dead
+// connection stays dead.
+func WithRetry(attempts int, wait time.Duration) ClientOption {
+	return func(c *Client) {
+		if attempts < 0 {
+			attempts = 0
+		}
+		c.retries = attempts
+		c.retryWait = wait
+	}
+}
+
 // WithContext sets a context used to cancel in-flight operations.
 func WithContext(ctx context.Context) ClientOption {
 	return func(c *Client) {
@@ -53,6 +79,8 @@ func NewClient(opts ...ClientOption) *Client {
 	c := &Client{
 		socketPath: DefaultNSSSocketPath,
 		timeout:    5 * time.Second,
+		retries:    2,
+		retryWait:  100 * time.Millisecond,
 	}
 
 	for _, opt := range opts {
@@ -163,8 +191,19 @@ func (c *Client) sendRequest(command uint32, data []byte) (*Response, error) {
 	ctx := c.ctx
 	c.mu.Unlock()
 
+	// Connect on demand. A client built before SSSD was listening is the
+	// normal case in a container, and it should not be permanently
+	// useless because of when it happened to be constructed.
 	if conn == nil {
-		return nil, fmt.Errorf("not connected")
+		if err := c.connect(context.Background(), false); err != nil {
+			return nil, err
+		}
+		c.mu.Lock()
+		conn = c.conn
+		c.mu.Unlock()
+		if conn == nil {
+			return nil, fmt.Errorf("not connected")
+		}
 	}
 
 	// Set write deadline
@@ -237,11 +276,82 @@ func (c *Client) sendRequest(command uint32, data []byte) (*Response, error) {
 	return resp, nil
 }
 
+// resetConn drops the current connection so the next attempt dials again.
+func (c *Client) resetConn() {
+	c.mu.Lock()
+	conn := c.conn
+	c.conn = nil
+	c.mu.Unlock()
+	if conn != nil {
+		_ = conn.Close()
+	}
+}
+
+// waitBeforeRetry pauses between attempts, and reports false if the
+// client's context was cancelled while waiting.
+func (c *Client) waitBeforeRetry() bool {
+	c.mu.Lock()
+	wait, ctx := c.retryWait, c.ctx
+	c.mu.Unlock()
+
+	if wait <= 0 {
+		return ctx == nil || ctx.Err() == nil
+	}
+	if ctx == nil {
+		time.Sleep(wait)
+		return true
+	}
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
+// send runs a STATELESS request, reconnecting if the link has died.
+//
+// Only safe for requests that carry their whole meaning in one exchange.
+// Anything that depends on per-connection state -- an enumeration cursor
+// -- must not come through here: a reconnect would silently restart that
+// state mid-sequence. See EnumerateUsers.
+func (c *Client) send(command uint32, data []byte) (*Response, error) {
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			c.resetConn()
+			if !c.waitBeforeRetry() {
+				return nil, lastErr
+			}
+		}
+
+		resp, err := c.sendRequest(command, data)
+		if err == nil {
+			return resp, nil
+		}
+		// A response means SSSD answered and the status IS its answer --
+		// "no such user" is not a broken link and must not be retried.
+		if resp != nil {
+			return resp, err
+		}
+		lastErr = err
+
+		c.mu.Lock()
+		retries := c.retries
+		c.mu.Unlock()
+		if attempt >= retries {
+			return nil, lastErr
+		}
+	}
+}
+
 // GetUserByName looks up a user by username
 func (c *Client) GetUserByName(username string) (*User, error) {
 	data := MarshalString(username)
 
-	resp, err := c.sendRequest(SSS_NSS_GETPWNAM, data)
+	resp, err := c.send(SSS_NSS_GETPWNAM, data)
 	if err != nil {
 		return nil, fmt.Errorf("GetUserByName failed: %w", err)
 	}
@@ -259,7 +369,7 @@ func (c *Client) GetUserByUID(uid uint32) (*User, error) {
 	data := make([]byte, 4)
 	binary.LittleEndian.PutUint32(data, uid)
 
-	resp, err := c.sendRequest(SSS_NSS_GETPWUID, data)
+	resp, err := c.send(SSS_NSS_GETPWUID, data)
 	if err != nil {
 		return nil, fmt.Errorf("GetUserByUID failed: %w", err)
 	}
@@ -276,7 +386,7 @@ func (c *Client) GetUserByUID(uid uint32) (*User, error) {
 func (c *Client) GetGroupByName(groupname string) (*Group, error) {
 	data := MarshalString(groupname)
 
-	resp, err := c.sendRequest(SSS_NSS_GETGRNAM, data)
+	resp, err := c.send(SSS_NSS_GETGRNAM, data)
 	if err != nil {
 		return nil, fmt.Errorf("GetGroupByName failed: %w", err)
 	}
@@ -294,7 +404,7 @@ func (c *Client) GetGroupByGID(gid uint32) (*Group, error) {
 	data := make([]byte, 4)
 	binary.LittleEndian.PutUint32(data, gid)
 
-	resp, err := c.sendRequest(SSS_NSS_GETGRGID, data)
+	resp, err := c.send(SSS_NSS_GETGRGID, data)
 	if err != nil {
 		return nil, fmt.Errorf("GetGroupByGID failed: %w", err)
 	}
@@ -315,7 +425,7 @@ func (c *Client) GetGroupByGID(gid uint32) (*Group, error) {
 func (c *Client) GetGroupsForUser(username string) ([]uint32, error) {
 	data := MarshalString(username)
 
-	resp, err := c.sendRequest(SSS_NSS_INITGR, data)
+	resp, err := c.send(SSS_NSS_INITGR, data)
 	if err != nil {
 		return nil, fmt.Errorf("GetGroupsForUser failed: %w", err)
 	}
@@ -395,9 +505,46 @@ const enumBatchSize = 100
 // Every entry is held in memory. For a directory of a few thousand accounts
 // that is a few hundred kilobytes; for a very large one, prefer looking
 // accounts up by name.
+//
+// A dropped connection restarts the whole enumeration rather than resuming
+// it. The cursor lives on the connection, so resuming after a reconnect
+// would silently re-read from the beginning and return duplicates, or skip
+// what the old connection had already yielded -- a wrong answer reported as
+// a successful one.
 func (c *Client) EnumerateUsers() ([]*User, error) {
-	if _, err := c.sendRequest(SSS_NSS_SETPWENT, nil); err != nil {
-		return nil, fmt.Errorf("SETPWENT failed: %w", err)
+	var lastErr error
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 {
+			c.resetConn()
+			if !c.waitBeforeRetry() {
+				return nil, lastErr
+			}
+		}
+
+		users, err, retryable := c.enumerateUsersOnce()
+		if err == nil {
+			return users, nil
+		}
+		lastErr = err
+		if !retryable {
+			return nil, lastErr
+		}
+
+		c.mu.Lock()
+		retries := c.retries
+		c.mu.Unlock()
+		if attempt >= retries {
+			return nil, lastErr
+		}
+	}
+}
+
+// enumerateUsersOnce runs one complete SETPWENT/GETPWENT/ENDPWENT sequence
+// over a single connection. The third return reports whether the failure
+// was the link rather than SSSD's answer, and so is worth another attempt.
+func (c *Client) enumerateUsersOnce() ([]*User, error, bool) {
+	if resp, err := c.sendRequest(SSS_NSS_SETPWENT, nil); err != nil {
+		return nil, fmt.Errorf("SETPWENT failed: %w", err), resp == nil
 	}
 	// End the enumeration whatever happens: SSSD keeps per-connection state
 	// for it, and abandoning that leaves the next caller reading from the
@@ -411,16 +558,18 @@ func (c *Client) EnumerateUsers() ([]*User, error) {
 
 		resp, err := c.sendRequest(SSS_NSS_GETPWENT, req)
 		if err != nil {
-			return nil, fmt.Errorf("GETPWENT failed after %d users: %w", len(users), err)
+			return nil, fmt.Errorf("GETPWENT failed after %d users: %w", len(users), err), resp == nil
 		}
 
 		batch, err := UnmarshalUsers(resp.Data)
 		if err != nil {
-			return nil, fmt.Errorf("parsing batch after %d users: %w", len(users), err)
+			// SSSD answered; the bytes are just not what we expected.
+			// Another connection would produce the same thing.
+			return nil, fmt.Errorf("parsing batch after %d users: %w", len(users), err), false
 		}
 		if len(batch) == 0 {
 			// A zero count is how SSSD says the enumeration is complete.
-			return users, nil
+			return users, nil, false
 		}
 		users = append(users, batch...)
 	}
